@@ -247,7 +247,7 @@
     <div id="runsBody"></div>
   </section>
 
-  <footer class="foot">Borrow fees on short positions are charged at the yearly rate in settings, counted by the day. Margin and dividends are not modelled. Brokerage and STT are included only while charges are switched on in settings. Runs in your browser; your data is saved to this page's own storage.</footer>
+  <footer class="foot">Margin on shorts is blocked from your own funds at the percentage in settings. Borrow fees on short positions are charged at the yearly rate in settings, counted by the day. Margin and dividends are not modelled. Brokerage and STT are included only while charges are switched on in settings. Runs in your browser; your data is saved to this page's own storage.</footer>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -298,6 +298,21 @@
       </div>
       <fieldset class="charge-fields" id="borrowFields">
         <div class="field-wrap"><label class="field" for="setBorrowRate">Borrow fee (% per year)</label><input type="number" id="setBorrowRate" min="0" max="100" step="any" inputmode="decimal"></div>
+      </fieldset>
+    </div>
+    <div class="charges-box">
+      <div class="charges-head">
+        <div>
+          <div class="charges-title">Margin on short positions</div>
+          <div class="charges-hint">Your broker blocks a percentage of each short's value from your own funds, and the sale proceeds can't be spent. When on, rebalances scale both books down until longs plus that margin fit within your portfolio value, leaving a buffer free. The long and short percentages above become maximums.</div>
+        </div>
+        <button type="button" class="switch" id="setMarginOn" role="switch" aria-checked="true" aria-label="Apply margin on shorts"><span class="track"></span><span class="state" id="setMarginState">On</span></button>
+      </div>
+      <fieldset class="charge-fields" id="marginFields">
+        <div class="grid-2 field-wrap">
+          <div><label class="field" for="setMarginPct">Margin blocked (% of short value)</label><input type="number" id="setMarginPct" min="0" max="1000" step="any" inputmode="decimal"></div>
+          <div><label class="field" for="setMarginBuf">Keep free (% of portfolio value)</label><input type="number" id="setMarginBuf" min="0" max="50" step="any" inputmode="decimal"></div>
+        </div>
       </fieldset>
     </div>
     <div class="banner">With 50% and 50% the two books are the same size, so the portfolio starts dollar neutral. Each name on a side gets an equal share of that side's allocation.</div>
@@ -391,7 +406,7 @@ var MAX_TRADES = 1000, MAX_RUNS = 36, MAX_DOC_CHARS = 230000;
 function defaultState(){
   return {
     v: 1, savedAt: 0,
-    settings: { metric: "", dir: "asc", skipNonPos: true, prefs: {}, perSide: 10, longPct: 50, shortPct: 50, currency: "₹", whole: true, cols: { name: "", cmp: "" }, charges: { on: false, brokerage: { mode: "pct", value: 0 }, stt: { mode: "pct", value: 0 } }, borrow: { on: true, rate: 2 } },
+    settings: { metric: "", dir: "asc", skipNonPos: true, prefs: {}, perSide: 10, longPct: 50, shortPct: 50, currency: "₹", whole: true, cols: { name: "", cmp: "" }, charges: { on: false, brokerage: { mode: "pct", value: 0 }, stt: { mode: "pct", value: 0 } }, borrow: { on: true, rate: 2 }, margin: { on: true, pct: 125, buffer: 10 } },
     portfolio: { started: false, cash: 0, initialCapital: 0, startedDate: null, holdings: [], realized: { long: 0, short: 0 }, exits: { n: 0, wins: 0 }, fees: { brokerage: 0, stt: 0, borrow: 0 } },
     trades: [],
     runs: []
@@ -485,6 +500,22 @@ function normBorrow(b){
   if (!b || typeof b !== "object") return { on: true, rate: 2 };
   var r = parseFloat(b.rate); r = isFinite(r) && r > 0 ? Math.min(r, 100) : 0;
   return { on: b.on !== false, rate: r };
+}
+function normMargin(m){
+  var out = { on: true, pct: 125, buffer: 10 };
+  if (!m || typeof m !== "object") return out;
+  out.on = m.on !== false;
+  var p = parseFloat(m.pct); if (isFinite(p) && p >= 0) out.pct = Math.min(p, 1000);
+  var b = parseFloat(m.buffer); if (isFinite(b) && b >= 0) out.buffer = Math.min(b, 50);
+  return out;
+}
+function marginOn(){ var m = state.settings.margin; return !!(m && m.on && m.pct > 0); }
+// Own funds (portfolio value) must cover long positions in full plus the margin blocked on shorts.
+function marginStats(){
+  var eq = equity(), L = longValue(), S = shortValue(), m = state.settings.margin;
+  var req = marginOn() ? S * m.pct / 100 : 0, used = L + req, free = eq - used, rise = null;
+  if (marginOn() && S > 0) rise = free > 0 ? free / (S * (1 + m.pct / 100)) * 100 : 0;
+  return { eq: eq, long: L, short: S, required: req, used: used, free: free, util: eq > 0 ? used / eq * 100 : 0, rise: rise };
 }
 function daysBetween(a, b){
   var pa = Date.parse(a + "T00:00:00Z"), pb = Date.parse(b + "T00:00:00Z");
@@ -581,6 +612,7 @@ function normalize(raw){
   d.settings.prefs = (rs.prefs && typeof rs.prefs === "object") ? rs.prefs : {};
   d.settings.charges = normCharges(rs.charges);
   d.settings.borrow = normBorrow(rs.borrow);
+  d.settings.margin = normMargin(rs.margin);
   var rp = raw.portfolio || {};
   d.portfolio.started = !!rp.started;
   d.portfolio.cash = Number(rp.cash) || 0;
@@ -800,9 +832,12 @@ function computeRebalance(screen, opts){
     }
   });
   var eq = cash + longMV - shortMV;
-  var base = Math.max(0, eq - pendLong + pendShort);
-  var perLong = screen.n > 0 ? base * s.longPct / 100 / screen.n : 0;
-  var perShort = screen.n > 0 ? base * s.shortPct / 100 / screen.n : 0;
+  var mOn = marginOn(), mp = mOn ? s.margin.pct / 100 : 0, fit = 1;
+  // With margin on, positions kept outside this sheet still tie up funds, and the targets are scaled down until longs plus margin on shorts fit with the chosen buffer.
+  var base = mOn ? Math.max(0, eq - pendLong - mp * pendShort) : Math.max(0, eq - pendLong + pendShort);
+  if (mOn) { var need = s.longPct / 100 + s.shortPct / 100 * mp, room = 1 - s.margin.buffer / 100; if (need > room && need > 0) fit = Math.max(0, room) / need; }
+  var perLong = screen.n > 0 ? base * fit * s.longPct / 100 / screen.n : 0;
+  var perShort = screen.n > 0 ? base * fit * s.shortPct / 100 / screen.n : 0;
   var target = {};
   screen.longs.forEach(function(r, i){ target[r.key] = { side: "LONG", row: r, rank: i + 1 }; });
   screen.shorts.forEach(function(r, i){ target[r.key] = { side: "SHORT", row: r, rank: i + 1 }; });
@@ -840,7 +875,14 @@ function computeRebalance(screen, opts){
   var est = { b: 0, s: 0, total: 0 };
   closes.concat(opens).forEach(function(a){ var f = chargesFor(a.value); est.b += f.b; est.s += f.s; est.total += f.total; });
   est.b = round2(est.b); est.s = round2(est.s); est.total = round2(est.total);
-  return { actions: closes.concat(opens, holds), closes: closes, opens: opens, holds: holds, pending: pending, tooExpensive: tooExp, fees: est, equity: eq, base: base, perLong: perLong, perShort: perShort, n: screen.n, capital: opts && opts.capital };
+  var lAfter = longMV, sAfter = shortMV;
+  closes.concat(opens).forEach(function(a){
+    if (a.action === "BUY") lAfter += a.value; else if (a.action === "SELL") lAfter -= a.value;
+    else if (a.action === "SHORT") sAfter += a.value; else if (a.action === "COVER") sAfter -= a.value;
+  });
+  var reqAfter = mOn ? sAfter * mp : 0;
+  var marginInfo = { on: mOn, pct: s.margin.pct, buffer: s.margin.buffer, fit: fit, longAfter: lAfter, shortAfter: sAfter, required: reqAfter, free: eq - est.total - lAfter - reqAfter, eq: eq };
+  return { margin: marginInfo, actions: closes.concat(opens, holds), closes: closes, opens: opens, holds: holds, pending: pending, tooExpensive: tooExp, fees: est, equity: eq, base: base, perLong: perLong, perShort: perShort, n: screen.n, capital: opts && opts.capital };
 }
 function dirWords(dir){ return dir === "asc" ? { best: "lowest", worst: "highest" } : { best: "highest", worst: "lowest" }; }
 function tradeSide(action){ return (action === "BUY" || action === "SELL") ? "LONG" : "SHORT"; }
@@ -907,7 +949,13 @@ function renderAll(){
 }
 function renderEquityWarning(){
   var el = $("equityWarning");
-  el.innerHTML = (state.portfolio.started && equity() <= 0) ? '<div class="banner bad">Portfolio value is zero or negative. Check your recent trades; short positions can lose more than the capital behind them.</div>' : "";
+  var html = (state.portfolio.started && equity() <= 0) ? '<div class="banner bad">Portfolio value is zero or negative. Check your recent trades; short positions can lose more than the capital behind them.</div>' : "";
+  if (state.portfolio.started && marginOn() && equity() > 0) {
+    var ms = marginStats();
+    if (ms.free < 0) html += '<div class="banner bad">Margin shortfall of ' + money(-ms.free) + '. Your longs plus the ' + state.settings.margin.pct + '% margin on your shorts need ' + money(ms.used) + ', but portfolio value is ' + money(ms.eq) + '. Cover some shorts or add funds.</div>';
+    else if (ms.free < ms.eq * 0.05) html += '<div class="banner warn">Free margin is low: ' + money(ms.free) + ' (' + (ms.free / ms.eq * 100).toFixed(1) + '% of portfolio value). Shorts that rise further could cause a shortfall.</div>';
+  }
+  el.innerHTML = html;
 }
 function renderHero(){
   var h = $("hero"), p = state.portfolio, s = state.settings;
@@ -987,6 +1035,13 @@ function renderStats(){
         statTile("Charges as % of capital", pctCap + "%", "", "of starting capital");
     }
     parts.push("Book P&L and realised P&L above are before charges and borrow fees");
+  }
+  if (marginOn()) {
+    var mst = marginStats();
+    $("statsGrid").innerHTML +=
+      statTile("Margin blocked", money(mst.required), "", state.settings.margin.pct + "% of " + money(mst.short) + " short value") +
+      statTile("Free margin", money(mst.free), mst.free < 0 ? "neg" : "", mst.eq > 0 ? (mst.free < 0 ? "shortfall" : (mst.free / mst.eq * 100).toFixed(1) + "% of portfolio value") + " · " + mst.util.toFixed(0) + "% of funds in use" : "") +
+      statTile("Shorts can rise", mst.rise === null ? "—" : mst.rise.toFixed(1) + "%", mst.rise !== null && mst.rise <= 0 ? "neg" : "", "before free margin runs out");
   }
   if (p.exits.n > 0) parts.push("Win rate " + Math.round(p.exits.wins / p.exits.n * 100) + "% across " + p.exits.n + " closed position" + (p.exits.n === 1 ? "" : "s"));
   var best = null, worst = null;
@@ -1196,6 +1251,11 @@ function renderActions(rb, ctx){
   if (on) html += '<div class="banner">Estimated charges on these trades: <strong>' + money(rb.fees.total, 2) + '</strong> (brokerage ' + money(rb.fees.b, 2) + ', STT ' + money(rb.fees.s, 2) + '). They are deducted from cash when you apply.</div>';
   if (borrowOn() && borrowAccrued() > 0) html += '<div class="banner">Borrow fee accrued on current short positions: <strong>about ' + money(borrowAccrued(), 2) + '</strong> at ' + state.settings.borrow.rate + '% a year. It is deducted from cash when you apply.</div>';
   if (!flow.sample) html += '<div class="grid-2 field-wrap"><div><label class="field" for="rbDate">Rebalance date</label><input type="date" id="rbDate" value="' + todayISO() + '"></div></div><div class="stat-note">Borrow fees on shorts are counted by the days between dates, so set the date you actually traded. On the first day there is nothing to charge yet, and the fee builds up each day after that.</div>';
+  if (rb.margin && rb.margin.on) {
+    var mg = rb.margin, st = state.settings;
+    if (mg.fit < 1) html += '<div class="banner">Your targets of ' + st.longPct + '% long and ' + st.shortPct + '% short would need more own funds than you have once ' + mg.pct + '% margin is blocked on shorts. Both sides were scaled to ' + (mg.fit * 100).toFixed(0) + '% of target (about ' + (st.longPct * mg.fit).toFixed(1) + '% long and ' + (st.shortPct * mg.fit).toFixed(1) + '% short of portfolio value) so that ' + mg.buffer + '% stays free.</div>';
+    html += '<div class="banner' + (mg.free < 0 ? ' bad' : '') + '">Margin after these trades: longs ' + money(mg.longAfter) + ', shorts ' + money(mg.shortAfter) + ', margin blocked on shorts <strong>' + money(mg.required) + '</strong> (' + mg.pct + '%). Free funds left: <strong>' + money(mg.free) + '</strong>' + (mg.eq > 0 ? ' (' + (mg.free / mg.eq * 100).toFixed(1) + '% of portfolio value)' : '') + '.' + (mg.free < 0 ? ' This is a shortfall: you would not have enough funds for these trades.' : '') + '</div>';
+  }
   var closes = rb.closes, opens = rb.opens;
   html += '<h3 class="step">Sell and cover</h3>' + actionsTable(closes, "Nothing to close.", on) +
     '<h3 class="step">Buy and short</h3>' + actionsTable(opens, "Nothing to open.", on);
@@ -1251,6 +1311,12 @@ dz.addEventListener("dragover", function(e){ e.preventDefault(); dz.classList.ad
 dz.addEventListener("drop", function(e){ if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); });
 $("sampleBtn").onclick = function(){ resetFlow(); loadSheet(makeSample(), true, "example"); };
 
+function setMarginUI(on){
+  $("setMarginOn").setAttribute("aria-checked", on ? "true" : "false");
+  $("setMarginState").textContent = on ? "On" : "Off";
+  $("marginFields").disabled = !on;
+}
+$("setMarginOn").onclick = function(){ setMarginUI(this.getAttribute("aria-checked") !== "true"); };
 function setBorrowUI(on){
   $("setBorrowOn").setAttribute("aria-checked", on ? "true" : "false");
   $("setBorrowState").textContent = on ? "On" : "Off";
@@ -1292,6 +1358,7 @@ $("openSettings").onclick = function(){
   $("setSttMode").value = c.stt.mode; $("setSttVal").value = c.stt.value > 0 ? c.stt.value : "";
   setChargesUI(c.on); refreshChargesUI();
   setBorrowUI(s.borrow.on); $("setBorrowRate").value = s.borrow.rate;
+  setMarginUI(s.margin.on); $("setMarginPct").value = s.margin.pct; $("setMarginBuf").value = s.margin.buffer;
   paintAccountRow();
   $("settingsOverlay").classList.add("show");
 };
@@ -1309,6 +1376,8 @@ $("saveSettings").onclick = async function(){
   var today = todayISO();
   if (wasOn) state.portfolio.holdings.forEach(function(h){ if (h.side === "SHORT") settleBorrow(h, h.lastCmp, today); });
   s.borrow = nb;
+  var mpv = parseFloat($("setMarginPct").value), mbv = parseFloat($("setMarginBuf").value);
+  s.margin = normMargin({ on: $("setMarginOn").getAttribute("aria-checked") === "true", pct: isFinite(mpv) ? mpv : 0, buffer: isFinite(mbv) ? mbv : 0 });
   state.portfolio.holdings.forEach(function(h){ if (h.side === "SHORT") h.bd = today; });
   await persist(); $("settingsOverlay").classList.remove("show"); renderAll();
   if (flow.sheet) { renderConfigure(); rescreen(); }
