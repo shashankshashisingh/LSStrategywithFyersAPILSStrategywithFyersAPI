@@ -303,6 +303,15 @@
     <div class="charges-box">
       <div class="charges-head">
         <div>
+          <div class="charges-title">Exit and enter whole positions only</div>
+          <div class="charges-hint">When on, a stock that still qualifies is never trimmed or topped up, which saves charges. A stock is only sold or covered in full when it drops out, and new stocks are bought or shorted using only the cash that exits freed, split equally between them (separately for longs and shorts). Weights drift as prices move. Turn off to rebalance everything back to equal weight each month.</div>
+        </div>
+        <button type="button" class="switch" id="setFullOn" role="switch" aria-checked="true" aria-label="Exit and enter whole positions only"><span class="track"></span><span class="state" id="setFullState">On</span></button>
+      </div>
+    </div>
+    <div class="charges-box">
+      <div class="charges-head">
+        <div>
           <div class="charges-title">Margin on short positions</div>
           <div class="charges-hint">Your broker blocks a percentage of each short's value from your own funds, and the sale proceeds can't be spent. When on, rebalances scale both books down until longs plus that margin fit within your portfolio value, leaving a buffer free. The long and short percentages above become maximums.</div>
         </div>
@@ -406,8 +415,8 @@ var MAX_TRADES = 1000, MAX_RUNS = 36, MAX_DOC_CHARS = 230000;
 function defaultState(){
   return {
     v: 1, savedAt: 0,
-    settings: { metric: "", dir: "asc", skipNonPos: true, prefs: {}, perSide: 10, longPct: 50, shortPct: 50, currency: "₹", whole: true, cols: { name: "", cmp: "" }, charges: { on: false, brokerage: { mode: "pct", value: 0 }, stt: { mode: "pct", value: 0 } }, borrow: { on: true, rate: 2 }, margin: { on: true, pct: 125, buffer: 10 } },
-    portfolio: { started: false, cash: 0, initialCapital: 0, startedDate: null, holdings: [], realized: { long: 0, short: 0 }, exits: { n: 0, wins: 0 }, fees: { brokerage: 0, stt: 0, borrow: 0 } },
+    settings: { metric: "", dir: "asc", skipNonPos: true, prefs: {}, perSide: 10, longPct: 50, shortPct: 50, currency: "₹", whole: true, cols: { name: "", cmp: "" }, charges: { on: false, brokerage: { mode: "pct", value: 0 }, stt: { mode: "pct", value: 0 } }, borrow: { on: true, rate: 2 }, margin: { on: true, pct: 125, buffer: 10 }, fullOnly: true },
+    portfolio: { started: false, cash: 0, initialCapital: 0, startedDate: null, holdings: [], realized: { long: 0, short: 0 }, exits: { n: 0, wins: 0 }, fees: { brokerage: 0, stt: 0, borrow: 0 }, carry: { long: 0, short: 0 } },
     trades: [],
     runs: []
   };
@@ -613,6 +622,7 @@ function normalize(raw){
   d.settings.charges = normCharges(rs.charges);
   d.settings.borrow = normBorrow(rs.borrow);
   d.settings.margin = normMargin(rs.margin);
+  d.settings.fullOnly = rs.fullOnly !== false;
   var rp = raw.portfolio || {};
   d.portfolio.started = !!rp.started;
   d.portfolio.cash = Number(rp.cash) || 0;
@@ -623,6 +633,8 @@ function normalize(raw){
   d.portfolio.exits = Object.assign({ n: 0, wins: 0 }, rp.exits || {});
   var rf = rp.fees || {};
   d.portfolio.fees = { brokerage: Number(rf.brokerage) || 0, stt: Number(rf.stt) || 0, borrow: Number(rf.borrow) || 0 };
+  var rc = rp.carry || {};
+  d.portfolio.carry = { long: Math.max(0, Number(rc.long) || 0), short: Math.max(0, Number(rc.short) || 0) };
   d.portfolio.holdings.forEach(function(h){ if (h.side === "SHORT" && !h.bd) h.bd = d.portfolio.startedDate || todayISO(); });
   d.trades = Array.isArray(raw.trades) ? raw.trades : [];
   d.runs = Array.isArray(raw.runs) ? raw.runs : [];
@@ -832,16 +844,18 @@ function computeRebalance(screen, opts){
     }
   });
   var eq = cash + longMV - shortMV;
+  var full = !!s.fullOnly && !(opts && opts.capital !== undefined);
   var mOn = marginOn(), mp = mOn ? s.margin.pct / 100 : 0, fit = 1;
   // With margin on, positions kept outside this sheet still tie up funds, and the targets are scaled down until longs plus margin on shorts fit with the chosen buffer.
   var base = mOn ? Math.max(0, eq - pendLong - mp * pendShort) : Math.max(0, eq - pendLong + pendShort);
   if (mOn) { var need = s.longPct / 100 + s.shortPct / 100 * mp, room = 1 - s.margin.buffer / 100; if (need > room && need > 0) fit = Math.max(0, room) / need; }
+  if (full) fit = 1;
   var perLong = screen.n > 0 ? base * fit * s.longPct / 100 / screen.n : 0;
   var perShort = screen.n > 0 ? base * fit * s.shortPct / 100 / screen.n : 0;
   var target = {};
   screen.longs.forEach(function(r, i){ target[r.key] = { side: "LONG", row: r, rank: i + 1 }; });
   screen.shorts.forEach(function(r, i){ target[r.key] = { side: "SHORT", row: r, rank: i + 1 }; });
-  var closes = [], opens = [], holds = [], tooExp = [], held = {};
+  var closes = [], opens = [], holds = [], tooExp = [], held = {}, entries = [];
   function mk(action, side, key, name, shares, price, why, rank){
     var value = shares * price;
     return { action: action, side: side, key: key, name: name, shares: shares, price: price, value: value, fee: action === "HOLD" ? 0 : chargesFor(value).total, why: why, rank: rank };
@@ -851,6 +865,7 @@ function computeRebalance(screen, opts){
     var row = screen.byKey[h.key]; if (!row) return;
     var t = target[h.key], closeAct = h.side === "LONG" ? "SELL" : "COVER", openAct = h.side === "LONG" ? "BUY" : "SHORT";
     if (!t) { closes.push(mk(closeAct, h.side, h.key, h.name, h.shares, row.cmp, row.status === "ok" ? "drop" : "excl")); return; }
+    if (t.side === h.side && full) { holds.push(mk("HOLD", h.side, h.key, h.name, h.shares, row.cmp, "keep", t.rank)); return; }
     if (t.side === h.side) {
       var ns = sharesFor(t.side === "LONG" ? perLong : perShort, row.cmp), delta = ns - h.shares;
       if (Math.abs(delta) < minUnit) holds.push(mk("HOLD", h.side, h.key, h.name, h.shares, row.cmp, "hold", t.rank));
@@ -858,6 +873,7 @@ function computeRebalance(screen, opts){
       else closes.push(mk(closeAct, h.side, h.key, h.name, -delta, row.cmp, "trim", t.rank));
     } else {
       closes.push(mk(closeAct, h.side, h.key, h.name, h.shares, row.cmp, "flip", t.rank));
+      if (full) { entries.push({ side: t.side, key: h.key, name: h.name, price: row.cmp, rank: t.rank, why: "flip" }); return; }
       var ns2 = sharesFor(t.side === "LONG" ? perLong : perShort, row.cmp);
       if (ns2 > 0) opens.push(mk(t.side === "LONG" ? "BUY" : "SHORT", t.side, h.key, h.name, ns2, row.cmp, "flip", t.rank));
       else tooExp.push({ name: h.name, cmp: row.cmp, side: t.side });
@@ -866,11 +882,40 @@ function computeRebalance(screen, opts){
   [["LONG", screen.longs], ["SHORT", screen.shorts]].forEach(function(pair){
     pair[1].forEach(function(r, i){
       if (held[r.key]) return;
+      if (full) { entries.push({ side: pair[0], key: r.key, name: r.name, price: r.cmp, rank: i + 1, why: "open" }); return; }
       var ns = sharesFor(pair[0] === "LONG" ? perLong : perShort, r.cmp);
       if (ns > 0) opens.push(mk(pair[0] === "LONG" ? "BUY" : "SHORT", pair[0], r.key, r.name, ns, r.cmp, "open", i + 1));
       else tooExp.push({ name: r.name, cmp: r.cmp, side: pair[0] });
     });
   });
+  var fullInfo = null;
+  if (full) {
+    // Whole-position mode: only the cash freed by this month's exits (plus any unspent amount carried over) funds the new names, split equally on each side.
+    var mEff = mOn ? mp : 1, car = state.portfolio.carry || { long: 0, short: 0 };
+    var pool = { LONG: Number(car.long) || 0, SHORT: Number(car.short) || 0 }, freed = { LONG: 0, SHORT: 0 }, exits = { LONG: 0, SHORT: 0 };
+    closes.forEach(function(a){
+      var f = chargesFor(a.value).total, h = findHolding(a.key), got;
+      exits[a.side]++;
+      if (a.side === "LONG") got = a.value - f;
+      else got = mEff * a.value + (h ? (h.avgCost - a.price) * a.shares : 0) - f - (h ? accrualFor(h, a.price) : 0);
+      freed[a.side] += got; pool[a.side] += got;
+    });
+    var carryNext = { long: 0, short: 0 }, sized = { LONG: { n: 0, each: 0 }, SHORT: { n: 0, each: 0 } };
+    ["LONG", "SHORT"].forEach(function(side){
+      var list = entries.filter(function(e){ return e.side === side; }), pl = Math.max(0, pool[side]), mult = side === "LONG" ? 1 : mEff, spent = 0;
+      if (!list.length) { carryNext[side.toLowerCase()] = pl; return; }
+      var b = pl / list.length; sized[side].n = list.length; sized[side].each = b;
+      list.forEach(function(e){
+        var sh = sharesFor(b / mult, e.price);
+        while (sh >= minUnit && sh * e.price * mult + chargesFor(sh * e.price).total > b + 1e-9) sh = state.settings.whole ? sh - 1 : Math.floor((sh - minUnit) * 10000) / 10000;
+        if (sh < minUnit) { tooExp.push({ name: e.name, cmp: e.price, side: side }); return; }
+        spent += sh * e.price * mult + chargesFor(sh * e.price).total;
+        opens.push(mk(side === "LONG" ? "BUY" : "SHORT", side, e.key, e.name, sh, e.price, e.why, e.rank));
+      });
+      carryNext[side.toLowerCase()] = Math.max(0, pl - spent);
+    });
+    fullInfo = { freedLong: freed.LONG, freedShort: freed.SHORT, exitsLong: exits.LONG, exitsShort: exits.SHORT, newLongs: sized.LONG.n, newShorts: sized.SHORT.n, eachLong: sized.LONG.each, eachShort: sized.SHORT.each, poolLong: Math.max(0, pool.LONG), poolShort: Math.max(0, pool.SHORT), carryNext: carryNext };
+  }
   opens.sort(function(a, b){ return a.side === b.side ? a.rank - b.rank : (a.side === "LONG" ? -1 : 1); });
   var est = { b: 0, s: 0, total: 0 };
   closes.concat(opens).forEach(function(a){ var f = chargesFor(a.value); est.b += f.b; est.s += f.s; est.total += f.total; });
@@ -882,7 +927,7 @@ function computeRebalance(screen, opts){
   });
   var reqAfter = mOn ? sAfter * mp : 0;
   var marginInfo = { on: mOn, pct: s.margin.pct, buffer: s.margin.buffer, fit: fit, longAfter: lAfter, shortAfter: sAfter, required: reqAfter, free: eq - est.total - lAfter - reqAfter, eq: eq };
-  return { margin: marginInfo, actions: closes.concat(opens, holds), closes: closes, opens: opens, holds: holds, pending: pending, tooExpensive: tooExp, fees: est, equity: eq, base: base, perLong: perLong, perShort: perShort, n: screen.n, capital: opts && opts.capital };
+  return { full: fullInfo, margin: marginInfo, actions: closes.concat(opens, holds), closes: closes, opens: opens, holds: holds, pending: pending, tooExpensive: tooExp, fees: est, equity: eq, base: base, perLong: perLong, perShort: perShort, n: screen.n, capital: opts && opts.capital };
 }
 function dirWords(dir){ return dir === "asc" ? { best: "lowest", worst: "highest" } : { best: "highest", worst: "lowest" }; }
 function tradeSide(action){ return (action === "BUY" || action === "SELL") ? "LONG" : "SHORT"; }
@@ -901,6 +946,7 @@ function whyText(a, ctx){
     case "excl": return "Metric missing or excluded this month";
     case "flip": return (a.action === "SELL" || a.action === "COVER") ? ("Switching to the " + (a.action === "SELL" ? "short" : "long") + " side") : ("Switched from the " + (a.action === "SHORT" ? "long" : "short") + " side" + (a.rank ? " (#" + a.rank + ")" : ""));
     case "hold": return "Already at target weight";
+    case "keep": return "Still qualifies, kept as is";
     default: return a.note || "";
   }
 }
@@ -911,7 +957,7 @@ async function applyRebalance(rb, screen, ctx){
     var today = (ctx && ctx.date) || todayISO(), runId = String(Date.now());
     if (ctx.initial) {
       state.portfolio.cash = ctx.capital; state.portfolio.initialCapital = ctx.capital;
-      state.portfolio.holdings = []; state.portfolio.realized = { long: 0, short: 0 }; state.portfolio.exits = { n: 0, wins: 0 }; state.portfolio.fees = { brokerage: 0, stt: 0, borrow: 0 };
+      state.portfolio.holdings = []; state.portfolio.realized = { long: 0, short: 0 }; state.portfolio.exits = { n: 0, wins: 0 }; state.portfolio.fees = { brokerage: 0, stt: 0, borrow: 0 }; state.portfolio.carry = { long: 0, short: 0 };
     }
     state.portfolio.holdings.forEach(function(h){
       var row = screen.byKey[h.key];
@@ -922,6 +968,7 @@ async function applyRebalance(rb, screen, ctx){
       if (a.action === "HOLD") return;
       applyTrade({ date: today, action: a.action, name: a.name, shares: a.shares, price: a.price, why: a.why, rank: a.rank, src: "R", run: runId });
     });
+    state.portfolio.carry = rb.full ? { long: rb.full.carryNext.long, short: rb.full.carryNext.short } : { long: 0, short: 0 };
     state.portfolio.started = true;
     if (!state.portfolio.startedDate) state.portfolio.startedDate = today;
     state.runs.push({
@@ -1251,6 +1298,11 @@ function renderActions(rb, ctx){
   if (on) html += '<div class="banner">Estimated charges on these trades: <strong>' + money(rb.fees.total, 2) + '</strong> (brokerage ' + money(rb.fees.b, 2) + ', STT ' + money(rb.fees.s, 2) + '). They are deducted from cash when you apply.</div>';
   if (borrowOn() && borrowAccrued() > 0) html += '<div class="banner">Borrow fee accrued on current short positions: <strong>about ' + money(borrowAccrued(), 2) + '</strong> at ' + state.settings.borrow.rate + '% a year. It is deducted from cash when you apply.</div>';
   if (!flow.sample) html += '<div class="grid-2 field-wrap"><div><label class="field" for="rbDate">Rebalance date</label><input type="date" id="rbDate" value="' + todayISO() + '"></div></div><div class="stat-note">Borrow fees on shorts are counted by the days between dates, so set the date you actually traded. On the first day there is nothing to charge yet, and the fee builds up each day after that.</div>';
+  if (rb.full) {
+    var fu = rb.full, anyMove = rb.closes.length + rb.opens.length > 0;
+    html += '<div class="banner">Whole-position mode: positions that still qualify are left untouched, with no trimming or top-up. ' + (anyMove ? ('Exits free ' + money(fu.freedLong) + ' on the long side' + (fu.newLongs ? ', split equally across ' + fu.newLongs + ' new long' + (fu.newLongs === 1 ? '' : 's') + ' (about ' + money(fu.eachLong) + ' each)' : '') + ' and ' + money(fu.freedShort) + ' of funds on the short side' + (fu.newShorts ? ', split equally across ' + fu.newShorts + ' new short' + (fu.newShorts === 1 ? '' : 's') + ' (about ' + money(fu.eachShort) + ' of funds each)' : '') + '.') : 'Nothing needs to be exited or entered this month.') +
+      ((fu.carryNext.long + fu.carryNext.short) > 0.5 ? ' Unspent ' + money(fu.carryNext.long + fu.carryNext.short) + ' (rounding or no new names) carries into next month.' : '') + '</div>';
+  }
   if (rb.margin && rb.margin.on) {
     var mg = rb.margin, st = state.settings;
     if (mg.fit < 1) html += '<div class="banner">Your targets of ' + st.longPct + '% long and ' + st.shortPct + '% short would need more own funds than you have once ' + mg.pct + '% margin is blocked on shorts. Both sides were scaled to ' + (mg.fit * 100).toFixed(0) + '% of target (about ' + (st.longPct * mg.fit).toFixed(1) + '% long and ' + (st.shortPct * mg.fit).toFixed(1) + '% short of portfolio value) so that ' + mg.buffer + '% stays free.</div>';
@@ -1259,7 +1311,7 @@ function renderActions(rb, ctx){
   var closes = rb.closes, opens = rb.opens;
   html += '<h3 class="step">Sell and cover</h3>' + actionsTable(closes, "Nothing to close.", on) +
     '<h3 class="step">Buy and short</h3>' + actionsTable(opens, "Nothing to open.", on);
-  if (!ctx.initial) html += '<h3 class="step">Hold</h3>' + actionsTable(rb.holds, "No positions are already at target weight.", false);
+  if (!ctx.initial) html += '<h3 class="step">' + (rb.full ? 'Keep as is' : 'Hold') + '</h3>' + actionsTable(rb.holds, rb.full ? "No positions are being kept." : "No positions are already at target weight.", false);
   html += '<div class="btn-row">' + (flow.sample ? "" : '<button class="btn" id="applyBtn">Apply &amp; save portfolio</button><button class="btn secondary" id="exportBtn">Export order sheet (CSV)</button>') + '<button class="btn secondary" id="backBtn2">Back</button>' + (flow.sample ? '<button class="btn secondary" id="doneBtn">Close example</button>' : "") + '</div>';
   box.innerHTML = html;
   $("backBtn2").onclick = function(){ if (ctx.initial) renderCapital(); else renderPreview(); };
@@ -1311,6 +1363,11 @@ dz.addEventListener("dragover", function(e){ e.preventDefault(); dz.classList.ad
 dz.addEventListener("drop", function(e){ if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); });
 $("sampleBtn").onclick = function(){ resetFlow(); loadSheet(makeSample(), true, "example"); };
 
+function setFullUI(on){
+  $("setFullOn").setAttribute("aria-checked", on ? "true" : "false");
+  $("setFullState").textContent = on ? "On" : "Off";
+}
+$("setFullOn").onclick = function(){ setFullUI(this.getAttribute("aria-checked") !== "true"); };
 function setMarginUI(on){
   $("setMarginOn").setAttribute("aria-checked", on ? "true" : "false");
   $("setMarginState").textContent = on ? "On" : "Off";
@@ -1358,7 +1415,7 @@ $("openSettings").onclick = function(){
   $("setSttMode").value = c.stt.mode; $("setSttVal").value = c.stt.value > 0 ? c.stt.value : "";
   setChargesUI(c.on); refreshChargesUI();
   setBorrowUI(s.borrow.on); $("setBorrowRate").value = s.borrow.rate;
-  setMarginUI(s.margin.on); $("setMarginPct").value = s.margin.pct; $("setMarginBuf").value = s.margin.buffer;
+  setFullUI(s.fullOnly); setMarginUI(s.margin.on); $("setMarginPct").value = s.margin.pct; $("setMarginBuf").value = s.margin.buffer;
   paintAccountRow();
   $("settingsOverlay").classList.add("show");
 };
@@ -1376,6 +1433,7 @@ $("saveSettings").onclick = async function(){
   var today = todayISO();
   if (wasOn) state.portfolio.holdings.forEach(function(h){ if (h.side === "SHORT") settleBorrow(h, h.lastCmp, today); });
   s.borrow = nb;
+  s.fullOnly = $("setFullOn").getAttribute("aria-checked") === "true";
   var mpv = parseFloat($("setMarginPct").value), mbv = parseFloat($("setMarginBuf").value);
   s.margin = normMargin({ on: $("setMarginOn").getAttribute("aria-checked") === "true", pct: isFinite(mpv) ? mpv : 0, buffer: isFinite(mbv) ? mbv : 0 });
   state.portfolio.holdings.forEach(function(h){ if (h.side === "SHORT") h.bd = today; });
