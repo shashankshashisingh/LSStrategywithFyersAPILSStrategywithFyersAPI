@@ -121,6 +121,8 @@
   #liveOverlay table { min-width: 0; width: 100%; }
   #liveOverlay td, #liveOverlay th { padding-left: 12px; padding-right: 12px; }
   #liveRows input { max-width: 100%; }
+  .live-import { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 14px; }
+  .live-import-note { font-size: 13px; color: var(--ink-faint); flex: 1 1 220px; }
   #liveOverlay .table-scroll { max-height: 46vh; overflow: auto; }
   .toggle-link { background: none; border: none; color: var(--short); font-size: 13.5px; cursor: pointer; padding: 0; font-family: inherit; text-decoration: underline; text-underline-offset: 3px; }
 
@@ -411,8 +413,9 @@
 <div class="overlay" id="liveOverlay">
   <div class="panel">
     <h3>Live price settings</h3>
-    <p class="sub">Prices come from a free market data feed that can lag by up to 15 minutes. Enter the NSE symbol for each position, for example RELIANCE or M&amp;M. Names that already look like symbols are filled in for you.</p>
+    <p class="sub">Prices come from a free market data feed that can lag by up to 15 minutes. Import your ticker list once and company names are matched to NSE symbols automatically. You can also type or correct any symbol by hand, for example RELIANCE or M&amp;M.</p>
     <div class="check"><input type="checkbox" id="liveAuto"><label for="liveAuto">Refresh automatically every minute while the market is open <small>(Monday to Friday, 9:15 to 15:30 IST, while this page is open)</small></label></div>
+    <div class="live-import"><button class="btn secondary inline" id="liveImport" type="button">Import a ticker list</button><input type="file" id="liveFile" accept=".xlsx,.xls,.csv" hidden><span class="live-import-note" id="liveImportNote">An Excel or CSV file with a company column and an NSE symbol column. Do this once.</span></div>
     <div class="table-scroll"><table><thead><tr><th class="name">Position</th><th>NSE symbol</th></tr></thead><tbody id="liveRows"></tbody></table></div>
     <div class="close-row">
       <button class="btn secondary" id="liveCancel">Cancel</button>
@@ -1596,11 +1599,43 @@ function liveAvailable(){ return !(window.claude && window.claude.use) && !!SUPA
 function liveCfg(){
   var s = state.settings, l = (s.live && typeof s.live === "object") ? s.live : {};
   var sy = (l.symbols && typeof l.symbols === "object") ? l.symbols : {};
-  s.live = { auto: !!l.auto, symbols: sy, at: Number(l.at) || 0 };
+  var dr = (l.dir && typeof l.dir === "object") ? l.dir : {};
+  s.live = { auto: !!l.auto, symbols: sy, at: Number(l.at) || 0, dir: dr };
   return s.live;
 }
 function guessSymbol(name){ var n = String(name || "").trim(); return /^[A-Za-z][A-Za-z0-9&-]{1,19}$/.test(n) && n === n.toUpperCase() ? n : ""; }
-function symbolFor(h){ var m = liveCfg().symbols[h.key]; if (typeof m === "string" && m.trim() !== "") return m.trim().toUpperCase(); return guessSymbol(h.name); }
+function looseKey(n){
+  var k = normKey(String(n === null || n === undefined ? "" : n).normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/['\u2019`]/g, ""));
+  return k.split(" ").filter(function(w){ return w && ["ltd", "corp", "inc", "india", "of", "the", "co", "company"].indexOf(w) === -1; }).join(" ");
+}
+function symbolFor(h){
+  var l = liveCfg(), m = l.symbols[h.key];
+  if (typeof m === "string" && m.trim() !== "") return m.trim().toUpperCase();
+  var d = l.dir[looseKey(h.name)];
+  if (typeof d === "string" && d !== "") return d;
+  return guessSymbol(h.name);
+}
+function applyTickerSheet(parsed){
+  if (!parsed || !parsed.rows || !parsed.rows.length) return { error: "Could not find a header row and data rows in that file." };
+  var nameCol = "", symCol = "";
+  parsed.headers.forEach(function(h){
+    var t = String(h).toLowerCase();
+    if (!symCol && /symbol|ticker|scrip|nse code/.test(t)) symCol = h;
+    else if (!nameCol && /company|name|stock|security/.test(t)) nameCol = h;
+  });
+  if (!nameCol || !symCol) return { error: "Need one column with the company name and one with the NSE symbol, with headings such as Company and Symbol." };
+  var l = liveCfg(), added = 0, skipped = 0;
+  parsed.rows.forEach(function(r){
+    var nm = r[nameCol], sy = cleanSymbol(r[symCol]);
+    if (nm === null || nm === undefined || String(nm).trim() === "") return;
+    if (!sy) { skipped++; return; }
+    var full = looseKey(nm), bare = looseKey(String(nm).replace(/\([^)]*\)/g, " "));
+    [full, bare].forEach(function(k){ if (k && l.dir[k] !== sy) { l.dir[k] = sy; } });
+    added++;
+  });
+  if (Object.keys(l.dir).length > 4000) l.dir = {};
+  return { added: added, skipped: skipped };
+}
 function cleanSymbol(v){ var t = String(v || "").trim().toUpperCase().replace(/\.(NS|BO)$/, ""); return /^[A-Z0-9&-]{1,20}$/.test(t) ? t : ""; }
 function clockText(ms){ var d = new Date(ms); return pad2(d.getHours()) + ":" + pad2(d.getMinutes()); }
 function marketOpenNow(now){
@@ -1649,15 +1684,42 @@ function scheduleLive(){
   if (!want && liveTimer) { clearInterval(liveTimer); liveTimer = null; }
 }
 function openLive(){
-  var l = liveCfg(), rows = "";
-  state.portfolio.holdings.slice().sort(function(a, b){ return a.name.localeCompare(b.name); }).forEach(function(h){
-    rows += '<tr><td class="name">' + esc(h.name) + ' <small>' + sideWord(h.side) + '</small></td><td><input type="text" data-lk="' + esc(h.key) + '" value="' + esc(symbolFor(h)) + '" placeholder="e.g. TCS" maxlength="24" autocomplete="off" spellcheck="false"></td></tr>';
-  });
-  $("liveRows").innerHTML = rows; $("liveAuto").checked = !!l.auto;
+  var l = liveCfg();
+  fillLiveRows(); $("liveAuto").checked = !!l.auto;
+  $("liveImportNote").textContent = "An Excel or CSV file with a company column and an NSE symbol column. Do this once.";
   $("liveOverlay").classList.add("show");
 }
 $("refreshPrices").onclick = function(){ refreshPrices(true); };
 $("liveSetup").onclick = openLive;
+function fillLiveRows(){
+  var rows = "";
+  state.portfolio.holdings.slice().sort(function(a, b){ return a.name.localeCompare(b.name); }).forEach(function(h){
+    rows += '<tr><td class="name">' + esc(h.name) + ' <small>' + sideWord(h.side) + '</small></td><td><input type="text" data-lk="' + esc(h.key) + '" value="' + esc(symbolFor(h)) + '" placeholder="e.g. TCS" maxlength="24" autocomplete="off" spellcheck="false"></td></tr>';
+  });
+  $("liveRows").innerHTML = rows;
+}
+$("liveImport").onclick = function(){ $("liveFile").value = ""; $("liveFile").click(); };
+$("liveFile").onchange = function(){
+  var file = this.files && this.files[0]; if (!file) return;
+  var isText = /\.(csv|txt)$/i.test(file.name || ""), reader = new FileReader();
+  reader.onload = function(e){
+    var note = $("liveImportNote");
+    try {
+      var wb = isText ? XLSX.read(e.target.result, { type: "string" }) : XLSX.read(e.target.result, { type: "array" });
+      var res = applyTickerSheet(parseSheet(wb.Sheets[wb.SheetNames[0]]));
+      if (res.error) { note.textContent = res.error; return; }
+      var typed = {};
+      Array.prototype.forEach.call($("liveRows").querySelectorAll("input[data-lk]"), function(inp){ if (inp.value.trim() !== "") typed[inp.getAttribute("data-lk")] = inp.value; });
+      fillLiveRows();
+      var inputs = $("liveRows").querySelectorAll("input[data-lk]"), matched = 0;
+      Array.prototype.forEach.call(inputs, function(inp){ var k = inp.getAttribute("data-lk"); if (typed[k] && inp.value.trim() === "") inp.value = typed[k]; if (inp.value.trim() !== "") matched++; });
+      note.textContent = "Read " + res.added + " tickers" + (res.skipped ? " (" + res.skipped + " rows had no valid symbol)" : "") + ". " + matched + " of " + inputs.length + " positions now have a symbol. Fill any blanks by hand, then save.";
+      persist();
+    } catch (err) { if (window.console) console.error(err); note.textContent = "Could not read that file."; }
+  };
+  reader.onerror = function(){ $("liveImportNote").textContent = "Could not read that file."; };
+  if (isText) reader.readAsText(file); else reader.readAsArrayBuffer(file);
+};
 $("liveCancel").onclick = function(){ $("liveOverlay").classList.remove("show"); };
 $("liveOverlay").addEventListener("click", function(e){ if (e.target === this) this.classList.remove("show"); });
 $("liveSave").onclick = function(){
