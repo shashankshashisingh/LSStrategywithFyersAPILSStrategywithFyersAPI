@@ -16,3 +16,14 @@ By default the page saves to the browser you use. To save to an account instead 
 6. Commit. The page now asks you to sign in and saves your portfolio to your account.
 
 Never put the `service_role` key in this file.
+
+## Live prices
+
+The page can refresh position prices from a small Supabase Edge Function.
+
+1. In Supabase, open Edge Functions and create a function from the editor.
+2. Paste `supabase/functions/dynamic-service/index.ts` and deploy. Keep "Verify JWT" on.
+3. The page calls `/functions/v1/dynamic-service?symbols=TCS,RELIANCE`. If your function has another name, change that name in `index.html`.
+4. On the live site, open "Live price settings" and enter the NSE symbol for each position.
+
+Prices come from Yahoo Finance's free public feed and can lag by up to 15 minutes.
