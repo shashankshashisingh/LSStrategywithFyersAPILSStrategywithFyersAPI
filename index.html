@@ -124,6 +124,7 @@
   .live-import { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 14px; }
   .live-import-note { font-size: 13px; color: var(--ink-faint); flex: 1 1 220px; }
   #liveOverlay .table-scroll { max-height: 46vh; overflow: auto; }
+  button.toggle-link.danger-link { color: var(--loss); margin-left: 10px; }
   .toggle-link { background: none; border: none; color: var(--short); font-size: 13.5px; cursor: pointer; padding: 0; font-family: inherit; text-decoration: underline; text-underline-offset: 3px; }
 
   label.field { display: block; font-size: 13px; font-weight: 500; color: var(--ink-soft); margin-bottom: 6px; }
@@ -703,13 +704,14 @@ function normalize(raw){
   return d;
 }
 function trimLedger(){
-  if (state.trades.length > MAX_TRADES) state.trades = state.trades.slice(state.trades.length - MAX_TRADES);
+  if (state.trades.length > MAX_TRADES) { var k0 = state.trades.length - MAX_TRADES; state.trades = state.trades.slice(k0); shiftRunMarks(k0); }
   if (state.runs.length > MAX_RUNS) state.runs = state.runs.slice(state.runs.length - MAX_RUNS);
   var guard = 0;
   while (JSON.stringify(state).length > MAX_DOC_CHARS && state.trades.length > 50 && guard++ < 40) {
-    state.trades = state.trades.slice(Math.ceil(state.trades.length * 0.1));
+    var k1 = Math.ceil(state.trades.length * 0.1); state.trades = state.trades.slice(k1); shiftRunMarks(k1);
   }
 }
+function shiftRunMarks(k){ state.runs.forEach(function(r){ if (typeof r.tc === "number") r.tc = Math.max(0, r.tc - k); }); }
 async function doPersist(){
   trimLedger();
   state.savedAt = Date.now();
@@ -1016,6 +1018,7 @@ async function applyRebalance(rb, screen, ctx){
   var backup = clone(state);
   try {
     var today = (ctx && ctx.date) || todayISO(), runId = String(Date.now());
+    var preSnap = clone(state.portfolio), preTc = state.trades.length;
     if (ctx.initial) {
       state.portfolio.cash = ctx.capital; state.portfolio.initialCapital = ctx.capital;
       state.portfolio.holdings = []; state.portfolio.realized = { long: 0, short: 0 }; state.portfolio.exits = { n: 0, wins: 0 }; state.portfolio.fees = { brokerage: 0, stt: 0, borrow: 0 }; state.portfolio.carry = { long: 0, short: 0 };
@@ -1033,15 +1036,57 @@ async function applyRebalance(rb, screen, ctx){
     state.portfolio.started = true;
     if (!state.portfolio.startedDate) state.portfolio.startedDate = today;
     state.runs.push({
+      pre: preSnap, tc: preTc,
       id: runId, date: today, total: screen.stats.total, ranked: screen.ranked.length, n: screen.n,
       metric: state.settings.metric, dir: state.settings.dir, equity: rb.equity, pending: rb.pending.length,
       longs: screen.longs.map(function(r){ return r.name; }), shorts: screen.shorts.map(function(r){ return r.name; })
     });
+    state.runs.forEach(function(r, i){ if (i < state.runs.length - UNDO_DEPTH) { delete r.pre; } });
     await persist();
   } catch (e) {
     state = backup;
     throw e;
   }
+}
+
+/* ======================= undo the latest rebalance ======================= */
+var UNDO_DEPTH = 3;
+function canUndoRun(){
+  var r = state.runs[state.runs.length - 1];
+  return !!r && (!!r.pre || state.runs.length === 1);
+}
+function undoDroppedTrades(r){
+  if (typeof r.tc === "number") return state.trades.slice(r.tc);
+  var first = -1;
+  state.trades.forEach(function(t, i){ if (first < 0 && t.run === r.id) first = i; });
+  return first >= 0 ? state.trades.slice(first) : [];
+}
+async function undoLatestRun(){
+  if (!canUndoRun()) return false;
+  var r = state.runs[state.runs.length - 1], backup = clone(state);
+  try {
+    var pre = r.pre ? clone(r.pre) : defaultState().portfolio;
+    var drop = undoDroppedTrades(r).length;
+    if (drop > 0) state.trades = state.trades.slice(0, state.trades.length - drop);
+    var now = {}; state.portfolio.holdings.forEach(function(h){ now[h.key] = h.lastCmp; });
+    var restored = normalize({ portfolio: pre }).portfolio;
+    restored.holdings.forEach(function(h){ if (now[h.key] > 0) h.lastCmp = now[h.key]; });
+    state.portfolio = restored;
+    state.runs.pop();
+    resetFlow();
+    await persist();
+    return true;
+  } catch (e) { state = backup; throw e; }
+}
+function askUndoRun(){
+  if (!canUndoRun()) return;
+  var r = state.runs[state.runs.length - 1], mine = state.trades.filter(function(t){ return t.run === r.id; }).length;
+  var extra = Math.max(0, undoDroppedTrades(r).length - mine);
+  var body = "This removes the rebalance of " + r.date + (mine ? " and its " + mine + " trade" + (mine === 1 ? "" : "s") : "") + (extra ? ", plus " + extra + " trade" + (extra === 1 ? "" : "s") + " you recorded after it" : "") +
+    ". Positions, cash, realised P&L, charges and borrow fees go back to how they were just before it. " + (state.runs.length === 1 ? "This is your first rebalance, so the portfolio goes back to not started. " : "") + "You can then upload the sheet again. This cannot be undone.";
+  askConfirm("Delete the latest rebalance?", body, function(){
+    undoLatestRun().then(function(){ renderAll(); toast("Rebalance deleted."); }).catch(function(e){ toast("Could not delete the rebalance: " + (e && e.message ? e.message : e)); });
+  });
 }
 
 /* ======================= rendering: summary, positions, stats ======================= */
@@ -1190,19 +1235,20 @@ function renderTrades(){
 }
 function renderRuns(){
   var card = $("runsCard"), body = $("runsBody");
-  if (!state.runs.length) { card.hidden = true; return; }
+  if (!state.runs.length) { card.hidden = true; body.innerHTML = ""; return; }
   card.hidden = false;
   var runs = state.runs.slice().reverse();
   var html = '<div class="table-scroll"><table><thead><tr><th>Date</th><th class="name">Ranked on</th><th>Ranked</th><th>Per side</th><th>Trades</th><th>Needs manual exit</th><th>Portfolio value</th><th></th></tr></thead><tbody>';
   runs.forEach(function(r, i){
     var rt = state.trades.filter(function(t){ return t.run === r.id; });
     html += '<tr><td>' + esc(r.date) + '</td><td class="name">' + esc(r.metric) + ' <span class="reason">(long the ' + (r.dir === "asc" ? "lowest" : "highest") + ')</span></td><td>' + r.ranked + ' of ' + r.total + '</td><td>' + r.n + '</td><td>' + rt.length + '</td><td>' + (r.pending || 0) + '</td><td>' + money(r.equity) + '</td>' +
-      '<td><button class="toggle-link" data-run="' + i + '">Details</button></td></tr>' +
+      '<td><button class="toggle-link" data-run="' + i + '">Details</button>' + (i === 0 && canUndoRun() ? ' <button class="toggle-link danger-link" id="undoRunBtn" type="button">Delete</button>' : "") + '</td></tr>' +
       '<tr data-detail="' + i + '" hidden><td colspan="8" style="padding:10px 12px;">' +
       '<p class="reason" style="margin:0 0 8px;"><strong>Long:</strong> ' + esc((r.longs || []).join(", ") || "none") + '<br><strong>Short:</strong> ' + esc((r.shorts || []).join(", ") || "none") + '</p>' +
       (rt.length ? tradesTable(rt, true, true) : '<p class="empty-note">The trades for this run are no longer stored.</p>') + '</td></tr>';
   });
   body.innerHTML = html + '</tbody></table></div>';
+  var ub = $("undoRunBtn"); if (ub) ub.onclick = askUndoRun;
   Array.prototype.forEach.call(body.querySelectorAll("[data-run]"), function(b){
     b.onclick = function(){
       var row = body.querySelector('[data-detail="' + this.getAttribute("data-run") + '"]');
