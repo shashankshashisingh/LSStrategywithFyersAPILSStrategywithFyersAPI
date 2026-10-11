@@ -1662,9 +1662,10 @@ $("liveCancel").onclick = function(){ $("liveOverlay").classList.remove("show");
 $("liveOverlay").addEventListener("click", function(e){ if (e.target === this) this.classList.remove("show"); });
 $("liveSave").onclick = function(){
   var l = liveCfg(), bad = [], next = {};
+  Object.keys(l.symbols).forEach(function(k){ next[k] = l.symbols[k]; });
   Array.prototype.forEach.call($("liveRows").querySelectorAll("input[data-lk]"), function(inp){
     var k = inp.getAttribute("data-lk"), raw = inp.value.trim();
-    if (raw === "") return;
+    if (raw === "") { delete next[k]; return; }
     var c = cleanSymbol(raw); if (c) next[k] = c; else bad.push(raw);
   });
   if (bad.length) { toast("These are not valid symbols: " + bad.slice(0, 3).join(", ")); return; }
