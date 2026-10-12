@@ -1,0 +1,1 @@
+{ "functions": { "api/nse-test.js": { "maxDuration": 30 } } }
