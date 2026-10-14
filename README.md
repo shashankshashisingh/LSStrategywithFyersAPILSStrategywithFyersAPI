@@ -17,13 +17,16 @@ By default the page saves to the browser you use. To save to an account instead 
 
 Never put the `service_role` key in this file.
 
-## Live prices
+## Live prices (Fyers API)
 
-The page can refresh position prices from a small Supabase Edge Function.
+Live prices are fetched from Fyers through the Supabase Edge Function, so your Fyers credentials are never sent to the browser.
 
-1. In Supabase, open Edge Functions and create a function from the editor.
-2. Paste `supabase/functions/dynamic-service/index.ts` and deploy. Keep "Verify JWT" on.
-3. The page calls `/functions/v1/dynamic-service?symbols=TCS,RELIANCE`. If your function has another name, change that name in `index.html`.
-4. On the live site, open "Live price settings" and enter the NSE symbol for each position.
+1. In your Fyers developer app, make sure market-data API access is enabled and generate a valid access token.
+2. In Supabase, open **Edge Functions -> Secrets** (or use the Supabase CLI) and set:
+   - `FYERS_APP_ID`: your Fyers app/client ID, typically in the `APPID-100` format.
+   - `FYERS_ACCESS_TOKEN`: the current Fyers access token, without the app ID prefix.
+3. Deploy `supabase/functions/dynamic-service/index.ts` as the `dynamic-service` Edge Function. Keep **Verify JWT** enabled.
+4. In the app, open **Live price settings**, enter the NSE equity symbol for each position (for example `RELIANCE`, `TCS`, or `M&M`), and select automatic refresh if desired.
+5. Refresh the prices. The app can refresh every minute while the NSE market is open and the page remains open.
 
-Prices come from Yahoo Finance's free public feed and can lag by up to 15 minutes.
+**Important:** Fyers access tokens expire and must be renewed according to Fyers' authentication rules. Update the `FYERS_ACCESS_TOKEN` secret when you generate a new token. Do not put your app secret or access token in `index.html`, client-side JavaScript, or a public repository. The quote endpoint is for market data only; it does not place trades.
