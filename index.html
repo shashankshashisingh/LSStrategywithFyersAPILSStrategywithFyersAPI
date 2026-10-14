@@ -424,7 +424,7 @@
 <div class="overlay" id="liveOverlay">
   <div class="panel">
     <h3>Live price settings</h3>
-    <p class="sub">Prices come from a free market data feed that can lag by up to 15 minutes. Import your ticker list once and company names are matched to NSE symbols automatically. You can also type or correct any symbol by hand, for example RELIANCE or M&amp;M.</p>
+    <p class="sub">Prices are fetched from Fyers through a secure server-side connection. Import your ticker list once and company names are matched to NSE symbols automatically. You can also type or correct any symbol by hand, for example RELIANCE or M&amp;M.</p>
     <div class="check"><input type="checkbox" id="liveAuto"><label for="liveAuto">Refresh automatically every minute while the market is open <small>(Monday to Friday, 9:15 to 15:30 IST, while this page is open)</small></label></div>
     <div class="live-import"><button class="btn secondary inline" id="liveImport" type="button">Import a ticker list</button><input type="file" id="liveFile" accept=".xlsx,.xls,.csv" hidden><span class="live-import-note" id="liveImportNote">An Excel or CSV file with a company column and an NSE symbol column. Do this once.</span></div>
     <div class="table-scroll"><table><thead><tr><th class="name">Position</th><th>NSE symbol</th></tr></thead><tbody id="liveRows"></tbody></table></div>
@@ -1159,7 +1159,7 @@ function renderPositions(){
   var body = $("positionsBody"), sub = $("positionsSub"), pend = $("pendingBanner"), p = state.portfolio;
   if (!p.started) { sub.textContent = "Nothing here yet. Upload a sheet to build the first portfolio."; body.innerHTML = ""; pend.innerHTML = ""; return; }
   var lv = liveCfg();
-  sub.textContent = (liveAvailable() && lv.at) ? ("Live prices as of " + clockText(lv.at) + ". The data source can lag by up to 15 minutes.") : "Priced as of your latest upload, or the latest trade you recorded.";
+  sub.textContent = (liveAvailable() && lv.at) ? ("Live prices as of " + clockText(lv.at) + ". From Fyers market data.") : "Priced as of your latest upload, or the latest trade you recorded.";
   var pendingOnes = p.holdings.filter(function(h){ return h.pending; });
   pend.innerHTML = pendingOnes.length ? '<div class="banner warn">' + pendingOnes.length + ' position' + (pendingOnes.length === 1 ? " was" : "s were") + ' not in your last sheet and ' + (pendingOnes.length === 1 ? "was" : "were") + ' left untouched: ' +
     pendingOnes.map(function(h){ return esc(h.name) + " (" + sideWord(h.side) + ")"; }).join(", ") + '. Close ' + (pendingOnes.length === 1 ? "it" : "them") + ' yourself, then record the trade with the price you got.</div>' : "";
